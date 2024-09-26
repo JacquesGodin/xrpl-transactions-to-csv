@@ -20,6 +20,35 @@ This tool fetches XRPL transactions and exports them to a CSV file. You can eith
 
 Just install dependencies and then 'node index.js' to run the script.
 
+## How to Run the Script
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/your-username/your-repo-name.git
+   cd your-repo-name
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install prompt-sync dotenv xrpl-client moment
+   ```
+
+3. Set up a `.env` file with the following content:
+   ```
+   LEDGER=xxxxxxx
+   ```
+
+4. Run the script:
+   ```bash
+   node index.js
+   ```
+
+## Features
+- Fetches XRPL transactions between a range of ledgers or from a specific ledger defined in `.env`.
+- Estimates CSV file size before the data dump.
+- Terminates automatically when an unvalidated ledger is encountered.
+
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for more details.

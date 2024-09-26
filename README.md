@@ -25,7 +25,7 @@ Just install dependencies and then 'node index.js' to run the script.
 1. Clone this repository:
    ```bash
    git clone https://github.com/JacquesGodin/xrpl-transactions-to-csv
-   cd your-repo-name
+   cd xrpl-transactions-to-csv
    ```
 
 2. Install dependencies:

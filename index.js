@@ -1,51 +1,52 @@
-/*
- * This script is based on code originally developed by Wietse Wind.
- * Original repository: https://github.com/WietseWind/fetch-xrpl-transactions/tree/google-bigquery
- * Modifications and enhancements by Jacques Godin.
- * Licensed under the MIT License.
- */
-
-
-require('dotenv').config(); // Load environment variables from .env file
+require('dotenv').config();
 const fs = require('fs');
-const prompt = require('prompt-sync')(); // Import prompt-sync for user input
+const prompt = require('prompt-sync')();
 const XrplClient = require('xrpl-client').XrplClient;
-const moment = require('moment'); // Import moment for date handling
+const moment = require('moment');
 
-// Configuration constants
-const XRPLNodeUrl = process.env.NODE || 'wss://s2.ripple.com';  // Use .env for NODE
-const defaultLedger = process.env.LEDGER ? parseInt(process.env.LEDGER) : null; // Default ledger from .env
-
-// CSV File Path
+const XRPLNodeUrl = process.env.NODE || 'wss://s2.ripple.com';
+const defaultLedger = process.env.LEDGER ? parseInt(process.env.LEDGER) : null;
 const csvFilePath = './transactions.csv';
 
-// Create the XRPL Client
-const Client = new XrplClient(XRPLNodeUrl);
+let Client;
+let startLedger, endLedger, lastProcessedLedger;
 
-// Fetch the current ledger index
+async function initClient() {
+  Client = new XrplClient(XRPLNodeUrl);
+  
+  // Handle connection events
+  Client.on('connected', () => console.log('Connected to XRPL Node.'));
+  Client.on('disconnected', handleDisconnect);
+  Client.on('reconnecting', () => console.log('Attempting to reconnect...'));
+}
+
+function handleDisconnect(code, reason) {
+  console.warn(`Disconnected from XRPL (code: ${code}, reason: ${reason}). Attempting to reconnect...`);
+  initClient().then(() => {
+    if (lastProcessedLedger < endLedger) {
+      console.log(`Resuming from ledger [${lastProcessedLedger + 1}]...`);
+      run(lastProcessedLedger + 1);
+    }
+  });
+}
+
 async function getCurrentLedgerIndex() {
   const result = await Client.send({ command: 'ledger_current' });
   return result.ledger_current_index;
 }
 
-// Prompt the user for start and end dates
 async function getLedgerRangeFromDates(currentLedgerIndex) {
   const startDateStr = prompt('Enter the start date (DD/MM/YYYY): ');
   const endDateStr = prompt('Enter the end date (DD/MM/YYYY): ');
 
-  // Convert the input dates to moments
   const startDate = moment(startDateStr, 'DD/MM/YYYY');
   const endDate = moment(endDateStr, 'DD/MM/YYYY');
-
   if (!startDate.isValid() || !endDate.isValid()) {
     console.error('Invalid dates provided.');
     process.exit(1);
   }
 
-  // Number of ledgers per day (approximation: 21,600 ledgers per day)
-  const ledgersPerDay = Math.floor(86400 / 4); // 86400 seconds per day, 4 seconds per ledger
-
-  // Calculate the ledger range
+  const ledgersPerDay = Math.floor(86400 / 4);
   const today = moment().startOf('day');
   const daysFromTodayStart = today.diff(startDate, 'days');
   const daysFromTodayEnd = today.diff(endDate, 'days');
@@ -57,11 +58,9 @@ async function getLedgerRangeFromDates(currentLedgerIndex) {
   return { startLedger, endLedger };
 }
 
-// Function to estimate the number of transactions and the file size
 async function estimateCsvSize(startLedger, endLedger) {
   const numLedgers = endLedger - startLedger + 1;
-  const sampleSize = 5; // We'll sample 5 ledgers to estimate transactions
-
+  const sampleSize = 5;
   let totalTransactions = 0;
   let totalRowSize = 0;
 
@@ -73,7 +72,6 @@ async function estimateCsvSize(startLedger, endLedger) {
       const numTransactions = ledgerResult.ledger.transactions.length;
       totalTransactions += numTransactions;
 
-      // Estimate row size based on the first transaction
       if (numTransactions > 0 && totalRowSize === 0) {
         const sampleRow = processTransactionToCsvRow(ledgerResult.ledger.transactions[0], ledgerResult.ledger);
         totalRowSize = Buffer.byteLength(sampleRow, 'utf-8');
@@ -92,22 +90,18 @@ async function estimateCsvSize(startLedger, endLedger) {
   return estimatedCsvSize;
 }
 
-// Function to fetch ledger transactions
 const fetchLedgerTransactions = (ledger_index) => {
   return new Promise((resolve, reject) => {
     Client.send({
       command: 'ledger',
       ledger_index: parseInt(ledger_index),
       transactions: true,
-      expand: true,  // Expanded data for full transaction details
-      validated: true  // Ensure only validated ledgers are queried
-    }).then((Result) => {
-      resolve(Result);
-    }).catch(reject);
+      expand: true,
+      validated: true
+    }).then(resolve).catch(reject);
   });
 };
 
-// Function to process a single transaction and return as a CSV row
 const processTransactionToCsvRow = (tx, ledger_info) => {
   const LedgerSequence = ledger_info.ledger_index || 'N/A';
   const CloseTime = ledger_info.close_time_human || 'N/A';
@@ -137,19 +131,42 @@ const processTransactionToCsvRow = (tx, ledger_info) => {
   const TransactionResult = tx.metaData?.TransactionResult || 'N/A';
   const DeliveredAmount = tx.metaData?.delivered_amount || 'N/A';
 
-  // Prepare CSV row
   return `${LedgerSequence},${CloseTime},${TransactionType},${Account},${Fee},${Sequence},${Flags},${Signers},${SourceTag},${Amount},${Destination},${DestinationTag},${Paths},${SendMax},${DeliverMin},${TakerGets},${TakerGetsCurrency},${TakerPays},${TakerPaysCurrency},${Expiration},${OfferSequence},${LimitAmount},${QualityIn},${QualityOut},${TransactionHash},${TransactionResult},${DeliveredAmount}`;
 };
 
-(async () => {
-  // Ask the user if they want to use the default LEDGER or provide a date range
-  const useDefaultLedger = prompt('Do you want to use the default LEDGER value from .env? (yes/no): ').toLowerCase();
+async function run(ledger_index) {
+  try {
+    const Result = await fetchLedgerTransactions(ledger_index);
+    const txCount = Result.ledger.transactions.length;
+    console.log(`${txCount > 0 ? 'Transactions in' : ' '.repeat(15)} ${Result.ledger_index}: `, txCount > 0 ? txCount : '-');
 
-  let startLedger, endLedger;
+    if (txCount > 0) {
+      const rows = Result.ledger.transactions.map(tx => processTransactionToCsvRow(tx, Result.ledger));
+      fs.appendFileSync(csvFilePath, rows.join('\n') + '\n');
+    }
+
+    lastProcessedLedger = ledger_index;
+
+    if (ledger_index < endLedger) {
+      run(ledger_index + 1);
+    } else {
+      console.log('Reached end of date range.');
+    }
+  } catch (error) {
+    console.warn(`Error fetching ledger ${ledger_index}: ${error}`);
+    if (!error.message.includes('ledger not validated') && ledger_index < endLedger) {
+      run(ledger_index + 1);
+    }
+  }
+}
+
+(async () => {
+  await initClient();
+  const useDefaultLedger = prompt('Do you want to use the default LEDGER value from .env? (yes/no): ').toLowerCase();
 
   if (useDefaultLedger === 'yes' && defaultLedger) {
     startLedger = defaultLedger;
-    endLedger = await getCurrentLedgerIndex(); // Use the current ledger as the end point
+    endLedger = await getCurrentLedgerIndex();
     console.log(`Using default LEDGER from .env: ${defaultLedger}, fetching up to the most recent ledger: ${endLedger}`);
   } else {
     const currentLedgerIndex = await getCurrentLedgerIndex();
@@ -160,72 +177,13 @@ const processTransactionToCsvRow = (tx, ledger_info) => {
 
   console.log('Estimating CSV file size...');
   const estimatedSize = await estimateCsvSize(startLedger, endLedger);
-
-  // Ask user if they want to proceed based on the estimated size
   const proceed = prompt(`The estimated size of the CSV file is ${(estimatedSize / (1024 * 1024)).toFixed(2)} MB. Do you want to proceed? (yes/no): `);
 
-  if (proceed.toLowerCase() !== 'yes') {
-    console.log('Operation canceled by the user.');
-    process.exit(0);
-  }
-
-  console.log('Proceeding with the data dump...');
-  
-  Client.ready().then((Connection) => {
-    let Stopped = false;
-    let LastLedger = 0;
-
-    console.log('Connected to the XRPL');
-  
+  if (proceed.toLowerCase() === 'yes') {
+    console.log('Proceeding with the data dump...');
     fs.writeFileSync(csvFilePath, 'LedgerSequence,CloseTime,TransactionType,Account,Fee,Sequence,Flags,Signers,SourceTag,Amount,Destination,DestinationTag,Paths,SendMax,DeliverMin,TakerGets,TakerGetsCurrency,TakerPays,TakerPaysCurrency,Expiration,OfferSequence,LimitAmount,QualityIn,QualityOut,TransactionHash,TransactionResult,DeliveredAmount\n');
-    
-    // Function to run the transaction fetching loop
-    const run = (ledger_index) => {
-      fetchLedgerTransactions(ledger_index).then((Result) => {
-        const txCount = Result.ledger.transactions.length;
-        console.log(`${txCount > 0 ? 'Transactions in' : ' '.repeat(15)} ${Result.ledger_index}: `, txCount > 0 ? txCount : '-');
-
-        if (txCount > 0) {
-          const rows = Result.ledger.transactions.map(tx => processTransactionToCsvRow(tx, Result.ledger));
-          fs.appendFileSync(csvFilePath, rows.join('\n') + '\n');
-        }
-
-        if (Stopped) {
-          return;
-        }
-
-        // Continue to the next ledger
-        if (ledger_index < endLedger) {
-          return run(ledger_index + 1);
-        } else {
-          console.log('Reached end of date range.');
-        }
-      }).catch((e) => {
-        // If the error indicates the ledger hasn't been minted yet, stop the script
-        if (e.message.includes('ledger not validated') || e.message.includes('ledgerIndex not found')) {
-          console.log(`Reached the most recent validated ledger at index: ${ledger_index}`);
-          process.exit(0); // Stop the process
-        } else {
-          console.warn(`Warning: ${e}`);
-          if (!Stopped && ledger_index < endLedger) {
-            return run(ledger_index + 1); // Skip to the next ledger if an error occurs
-          }
-        }
-      });
-    };
-
-    console.log(`Starting at ledger [ ${startLedger} ] and ending at [ ${endLedger} ]`);
-
     run(startLedger);
-
-    // Gracefully handle shutdown (Ctrl+C)
-    process.on('SIGINT', () => {
-      console.log(`\nGracefully shutting down from SIGINT (Ctrl+C)`);
-      Stopped = true;
-      Connection.close();
-      if (LastLedger > 0) {
-        console.log(`\nLast ledger: [ ${LastLedger} ]\nRun your next job with ENV: "LEDGER=${LastLedger + 1}"\n`);
-      }
-    });
-  });
+  } else {
+    console.log('Operation canceled by the user.');
+  }
 })();
